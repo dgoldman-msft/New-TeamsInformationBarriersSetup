@@ -1,0 +1,140 @@
+TOPIC
+    about_TeamsInformationBarriersSetup
+
+SHORT DESCRIPTION
+    Creates and configures an Information Barrier lab in Microsoft 365 Teams.
+
+LONG DESCRIPTION
+    The TeamsInformationBarriersSetup module provides one public command,
+    New-TeamsInformationBarriersSetup (alias: TIBS), which automates end-to-end
+    setup of a Microsoft Teams Information Barriers (IB) configuration in a
+    Microsoft 365 tenant.
+
+    The command is re-runnable. Existing users, groups, segments, and policies
+    are detected and reused on subsequent executions.
+
+    The tenant domain is derived automatically from -UserPrincipalName (the
+    portion after the @ sign). No separate -TenantName parameter is required.
+
+PHASES
+
+    Phase 0 - Identity (Microsoft Graph)
+        Looks up or creates internal test users in Allowed and Other categories.
+        Creates or reuses an Entra security group (IB-Allow-Team) for the
+        allowed users. Invites external guests via the Graph invitation API.
+
+    Phase 1 - Exchange Online
+        Connects to Exchange Online (skip with -StayConnected if already
+        connected). Polls until each internal user appears as a Mailbox
+        (licensed) or MailUser (unlicensed) object in EXO. Both types support
+        CustomAttribute1 and IB segments. Skip the poll with -SkipProvisioningWait
+        when users already have Exchange Online objects. Connects to Security
+        and Compliance PowerShell.
+
+    Phase 2 - Recipient tagging
+        Stamps CustomAttribute1 on each Exchange mailbox or mail user:
+            Allowed  - internal users permitted to communicate with guests
+            Other    - internal users blocked from guests
+            Guest    - external guest users
+
+    Phase 3 - Segments
+        Creates three organization segments keyed on CustomAttribute1:
+            SEG_A_GUESTS           - CustomAttribute1 -eq 'Guest'
+            SEG_B_INTERNAL_ALLOWED - CustomAttribute1 -eq 'Allowed'
+            SEG_C_INTERNAL_OTHER   - CustomAttribute1 -eq 'Other'
+
+    Phase 4 - Policies and enforcement
+        Creates four symmetric IB policies (every segment has an assigned
+        policy, satisfying the IB symmetry requirement):
+            Block-Guest-To-Internal-Other    - SEG_A_GUESTS blocks SEG_C_INTERNAL_OTHER
+            Allow-Guest-To-Team              - SEG_A_GUESTS allows SEG_A + SEG_B
+            Block-InternalOther-To-Guest     - SEG_C_INTERNAL_OTHER blocks SEG_A_GUESTS
+            Allow-InternalAllowed-To-Guest   - SEG_B_INTERNAL_ALLOWED allows SEG_A + SEG_B
+        Activates all policies and calls Start-InformationBarrierPoliciesApplication.
+
+REQUIRED PARAMETERS
+    -UserPrincipalName      UPN of the admin account. Mandatory.
+    -AllowedInternalAliases UPN prefixes of existing licensed internal users for
+                            the Allowed segment. Mandatory. No default.
+    -OtherInternalAliases   UPN prefixes of existing licensed internal users for
+                            the Other segment. Mandatory. No default.
+    -GuestNames             External guest email addresses to invite. Mandatory.
+
+    Specify aliases of users who already have Exchange Online mailboxes. If an
+    alias does not exist, a new Entra user is created but will require an
+    Exchange Online license before EXO provisions a recipient object.
+
+REQUIRED MODULES
+    The following modules are checked and installed automatically if missing:
+        Microsoft.Graph.Authentication
+        Microsoft.Graph.Users
+        Microsoft.Graph.Groups
+        Microsoft.Graph.Identity.SignIns
+        ExchangeOnlineManagement
+
+REQUIRED PERMISSIONS
+    Microsoft Graph       : User.ReadWrite.All, Group.ReadWrite.All,
+                            Directory.ReadWrite.All
+    Exchange Online       : Exchange Administrator or equivalent
+    Security & Compliance : Compliance Administrator or IB Administrator
+
+EXAMPLES
+    # Basic setup with pre-licensed internal users
+    New-TeamsInformationBarriersSetup `
+        -UserPrincipalName admin@contoso.onmicrosoft.com `
+        -GuestNames user1@company.com,user2@company.com `
+        -Password 'CreateYourPassword' `
+        -AllowedInternalAliases AllowedUser1,AllowedUser2 `
+        -OtherInternalAliases InternalUserName1,InternalUserName2 `
+        -SkipProvisioningWait
+
+    # Dry run - no changes made
+    New-TeamsInformationBarriersSetup `
+        -UserPrincipalName admin@contoso.onmicrosoft.com `
+        -GuestNames user1@company.com,user2@company.com `
+        -Password 'CreateYourPassword' `
+        -AllowedInternalAliases AllowedUser1,AllowedUser2 `
+        -OtherInternalAliases InternalUserName1,InternalUserName2 `
+        -WhatIf -Verbose
+
+    # Re-run using existing Exchange Online session
+    TIBS `
+        -UserPrincipalName admin@contoso.onmicrosoft.com `
+        -GuestNames user1@company.com,user2@company.com `
+        -Password 'CreateYourPassword' `
+        -AllowedInternalAliases AllowedUser1,AllowedUser2 `
+        -OtherInternalAliases InternalUserName1,InternalUserName2 `
+        -StayConnected `
+        -SkipProvisioningWait
+
+NOTES
+    IB POLICY PROPAGATION: Allow 30-60 minutes after
+    Start-InformationBarrierPoliciesApplication runs for enforcement to take
+    effect across all Teams conversations. Check progress with:
+        Get-InformationBarrierPoliciesApplicationStatus
+
+    EXCHANGE ONLINE LICENSING: Internal users must have at minimum an Exchange
+    Online Plan 1 or Kiosk license to appear as Mailbox objects in EXO. Without
+    a license, EXO will not provision a recipient object and CustomAttribute1
+    cannot be stamped. Guest users do NOT need a license — they appear as
+    MailUser objects automatically.
+
+    MAILBOX PROVISIONING DELAY: Newly created Entra users may take several
+    minutes to appear in Exchange Online as a Mailbox (licensed) or MailUser
+    (unlicensed). The command polls up to 3 minutes (6 x 30s) per user. Use
+    -SkipProvisioningWait to bypass the poll when users already have Exchange
+    Online objects.
+
+    VERIFYING IB IN TEAMS: After propagation completes, sign in as a guest or
+    internal user and attempt to start a 1:1 chat with a blocked party. Teams
+    will show "You can't send messages to this person" for blocked pairs. Use
+    Get-InformationBarrierRecipientStatus to verify programmatically:
+        Get-InformationBarrierRecipientStatus `
+            -Identity guest@external.com `
+            -Identity2 blockeduser@contoso.onmicrosoft.com
+
+SEE ALSO
+    Get-Help New-TeamsInformationBarriersSetup -Full
+    https://learn.microsoft.com/en-us/microsoftteams/information-barriers-in-teams
+    https://learn.microsoft.com/en-us/powershell/module/exchange/start-informationbarrierpoliciesapplication
+    https://learn.microsoft.com/en-us/powershell/module/exchange/get-informationbarrierrecipientstatus
