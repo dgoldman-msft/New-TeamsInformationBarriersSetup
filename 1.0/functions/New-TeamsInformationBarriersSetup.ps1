@@ -31,12 +31,18 @@ function New-TeamsInformationBarriersSetup {
                 SEG_C_INTERNAL_OTHER   — CustomAttribute1 -eq 'Other'
 
             Phase 4 — Policies and enforcement
-              Creates and activates four symmetric IB policies (every segment has an assigned
-              policy, satisfying the IB symmetry requirement):
+              Default (four symmetric IB policies):
                 Block-Guest-To-Internal-Other    (SEG_A_GUESTS      blocks SEG_C_INTERNAL_OTHER)
                 Allow-Guest-To-Team              (SEG_A_GUESTS      allows SEG_A_GUESTS + SEG_B_INTERNAL_ALLOWED)
                 Block-InternalOther-To-Guest     (SEG_C_INTERNAL_OTHER   blocks SEG_A_GUESTS)
                 Allow-InternalAllowed-To-Guest   (SEG_B_INTERNAL_ALLOWED allows SEG_A_GUESTS + SEG_B_INTERNAL_ALLOWED)
+
+              With -AllowInternalCommunication (five symmetric IB policies — adds B<->C communication):
+                Block-Guest-To-Internal-Other    (SEG_A_GUESTS      blocks SEG_C_INTERNAL_OTHER)
+                Allow-Guest-To-Team              (SEG_A_GUESTS      allows SEG_A_GUESTS + SEG_B_INTERNAL_ALLOWED)
+                Block-InternalOther-To-Guest     (SEG_C_INTERNAL_OTHER   blocks SEG_A_GUESTS)
+                Allow-InternalAllowed-To-All     (SEG_B_INTERNAL_ALLOWED allows SEG_A_GUESTS + SEG_B_INTERNAL_ALLOWED + SEG_C_INTERNAL_OTHER)
+                Allow-InternalOther-To-Allowed   (SEG_C_INTERNAL_OTHER   allows SEG_B_INTERNAL_ALLOWED + SEG_C_INTERNAL_OTHER)
               Calls Start-InformationBarrierPoliciesApplication to begin enforcement.
 
             A timestamped log file is always written to -LogDirectory for every run.
@@ -109,6 +115,16 @@ function New-TeamsInformationBarriersSetup {
             be present, or when you want to skip the wait and re-run with -StayConnected
             once provisioning completes.
 
+        .PARAMETER AllowInternalCommunication
+            When specified, creates an alternative policy set that allows SEG_B_INTERNAL_ALLOWED
+            and SEG_C_INTERNAL_OTHER to communicate directly with each other in addition to their
+            default communication rights. Guest isolation from SEG_C is preserved — guests still
+            cannot communicate with SEG_C directly.
+
+            NOTE: Because SEG_B can communicate with both guests (SEG_A) and SEG_C, and SEG_C can
+            communicate with SEG_B, data isolation is weakened in shared spaces such as Teams
+            channels and meetings. Evaluate this against your compliance requirements before use.
+
         .EXAMPLE
             New-TeamsInformationBarriersSetup `
                 -UserPrincipalName admin@contoso.onmicrosoft.com `
@@ -169,6 +185,19 @@ function New-TeamsInformationBarriersSetup {
                 -SkipProvisioningWait
 
             Same as Example 1 using the TIBS alias.
+
+        .EXAMPLE
+            New-TeamsInformationBarriersSetup `
+                -UserPrincipalName admin@contoso.onmicrosoft.com `
+                -GuestNames user1@company.com,user2@company.com `
+                -Password "CreateYourPassword" `
+                -AllowedInternalAliases AllowedUser1,AllowedUser2 `
+                -OtherInternalAliases InternalUserName1,InternalUserName2 `
+                -AllowInternalCommunication `
+                -SkipProvisioningWait
+
+            Same as Example 1 but adds an additional policy set that allows the Allowed and Other
+            internal segments to communicate with each other. Guest-to-Other isolation is preserved.
 
         .OUTPUTS
         System.Management.Automation.PSCustomObject
@@ -274,7 +303,11 @@ function New-TeamsInformationBarriersSetup {
 
         [Parameter()]
         [switch]
-        $SkipProvisioningWait
+        $SkipProvisioningWait,
+
+        [Parameter()]
+        [switch]
+        $AllowInternalCommunication
     )
 
     begin {
@@ -520,13 +553,22 @@ function New-TeamsInformationBarriersSetup {
 
         Write-ToLogFile -StringObject "$(Get-TimeStamp) Phase 3 - Create IB policies (inactive first)" -LogFile $script:TIBS_LogFile -ForegroundColor Cyan
         # Policies must be symmetric: every segment referenced as a target must also have its own assigned policy.
-        # SEG_A_GUESTS policies (what guests can/cannot communicate with)
-        Get-OrCreateInformationBarrierPolicy -Name "Block-Guest-To-Internal-Other"       -AssignedSegment "SEG_A_GUESTS"           -Mode "Blocked" -Targets @("SEG_C_INTERNAL_OTHER")                          -Cmdlet $PSCmdlet | Out-Null
-        Get-OrCreateInformationBarrierPolicy -Name "Allow-Guest-To-Team"                 -AssignedSegment "SEG_A_GUESTS"           -Mode "Allowed" -Targets @("SEG_A_GUESTS", "SEG_B_INTERNAL_ALLOWED")    -Cmdlet $PSCmdlet | Out-Null
-        # SEG_C_INTERNAL_OTHER policies (symmetric reverse of Block-Guest-To-Internal-Other)
-        Get-OrCreateInformationBarrierPolicy -Name "Block-InternalOther-To-Guest"        -AssignedSegment "SEG_C_INTERNAL_OTHER"   -Mode "Blocked" -Targets @("SEG_A_GUESTS")                               -Cmdlet $PSCmdlet | Out-Null
-        # SEG_B_INTERNAL_ALLOWED policies (symmetric — allowed team can communicate with guests and each other)
-        Get-OrCreateInformationBarrierPolicy -Name "Allow-InternalAllowed-To-Guest"      -AssignedSegment "SEG_B_INTERNAL_ALLOWED" -Mode "Allowed" -Targets @("SEG_A_GUESTS", "SEG_B_INTERNAL_ALLOWED")    -Cmdlet $PSCmdlet | Out-Null
+        # SEG_A_GUESTS policies (what guests can/cannot communicate with) — same for both modes
+        Get-OrCreateInformationBarrierPolicy -Name "Block-Guest-To-Internal-Other"       -AssignedSegment "SEG_A_GUESTS"           -Mode "Blocked" -Targets @("SEG_C_INTERNAL_OTHER")                                                       -Cmdlet $PSCmdlet | Out-Null
+        Get-OrCreateInformationBarrierPolicy -Name "Allow-Guest-To-Team"                 -AssignedSegment "SEG_A_GUESTS"           -Mode "Allowed" -Targets @("SEG_A_GUESTS", "SEG_B_INTERNAL_ALLOWED")                               -Cmdlet $PSCmdlet | Out-Null
+        # SEG_C_INTERNAL_OTHER: block guests — same for both modes
+        Get-OrCreateInformationBarrierPolicy -Name "Block-InternalOther-To-Guest"        -AssignedSegment "SEG_C_INTERNAL_OTHER"   -Mode "Blocked" -Targets @("SEG_A_GUESTS")                                                            -Cmdlet $PSCmdlet | Out-Null
+        if ($AllowInternalCommunication) {
+            Write-ToLogFile -StringObject "$(Get-TimeStamp) -AllowInternalCommunication specified: creating extended policy set (B<->C communication allowed)." -LogFile $script:TIBS_LogFile -ForegroundColor Yellow
+            # SEG_B: allowed team communicates with guests, each other, AND other internal segment
+            Get-OrCreateInformationBarrierPolicy -Name "Allow-InternalAllowed-To-All"     -AssignedSegment "SEG_B_INTERNAL_ALLOWED" -Mode "Allowed" -Targets @("SEG_A_GUESTS", "SEG_B_INTERNAL_ALLOWED", "SEG_C_INTERNAL_OTHER") -Cmdlet $PSCmdlet | Out-Null
+            # SEG_C: other internal segment communicates with allowed team and each other (symmetric)
+            Get-OrCreateInformationBarrierPolicy -Name "Allow-InternalOther-To-Allowed"   -AssignedSegment "SEG_C_INTERNAL_OTHER"   -Mode "Allowed" -Targets @("SEG_B_INTERNAL_ALLOWED", "SEG_C_INTERNAL_OTHER")                    -Cmdlet $PSCmdlet | Out-Null
+        }
+        else {
+            # SEG_B: allowed team communicates with guests and each other only (default isolation)
+            Get-OrCreateInformationBarrierPolicy -Name "Allow-InternalAllowed-To-Guest"   -AssignedSegment "SEG_B_INTERNAL_ALLOWED" -Mode "Allowed" -Targets @("SEG_A_GUESTS", "SEG_B_INTERNAL_ALLOWED")                              -Cmdlet $PSCmdlet | Out-Null
+        }
         Write-ToLogFile -StringObject "$(Get-TimeStamp) Policies created:" -LogFile $script:TIBS_LogFile -ForegroundColor Green
         Get-InformationBarrierPolicy | Format-Table Name, State, AssignedSegment, Segments* -Auto
 
@@ -534,7 +576,13 @@ function New-TeamsInformationBarriersSetup {
         Set-InformationBarrierPolicyActive -Name "Block-Guest-To-Internal-Other"    -Cmdlet $PSCmdlet
         Set-InformationBarrierPolicyActive -Name "Allow-Guest-To-Team"              -Cmdlet $PSCmdlet
         Set-InformationBarrierPolicyActive -Name "Block-InternalOther-To-Guest"     -Cmdlet $PSCmdlet
-        Set-InformationBarrierPolicyActive -Name "Allow-InternalAllowed-To-Guest"   -Cmdlet $PSCmdlet
+        if ($AllowInternalCommunication) {
+            Set-InformationBarrierPolicyActive -Name "Allow-InternalAllowed-To-All"    -Cmdlet $PSCmdlet
+            Set-InformationBarrierPolicyActive -Name "Allow-InternalOther-To-Allowed"  -Cmdlet $PSCmdlet
+        }
+        else {
+            Set-InformationBarrierPolicyActive -Name "Allow-InternalAllowed-To-Guest"  -Cmdlet $PSCmdlet
+        }
         Write-ToLogFile -StringObject "$(Get-TimeStamp) Policies active:" -LogFile $script:TIBS_LogFile -ForegroundColor Green
         Get-InformationBarrierPolicy | Format-Table Name, State, AssignedSegment, Segments* -Auto
 
@@ -579,7 +627,11 @@ function New-TeamsInformationBarriersSetup {
             OtherUserCount   = @($otherUsers).Count
             GuestCount       = @($GuestEmails).Count
             Segments         = @("SEG_A_GUESTS", "SEG_B_INTERNAL_ALLOWED", "SEG_C_INTERNAL_OTHER")
-            Policies         = @("Block-Guest-To-Internal-Other", "Allow-Guest-To-Team", "Block-InternalOther-To-Guest", "Allow-InternalAllowed-To-Guest")
+            Policies         = if ($AllowInternalCommunication) {
+                                   @("Block-Guest-To-Internal-Other", "Allow-Guest-To-Team", "Block-InternalOther-To-Guest", "Allow-InternalAllowed-To-All", "Allow-InternalOther-To-Allowed")
+                               } else {
+                                   @("Block-Guest-To-Internal-Other", "Allow-Guest-To-Team", "Block-InternalOther-To-Guest", "Allow-InternalAllowed-To-Guest")
+                               }
         }
     }
 
