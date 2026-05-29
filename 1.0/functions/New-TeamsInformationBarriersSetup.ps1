@@ -25,25 +25,40 @@ function New-TeamsInformationBarriersSetup {
               with the value Allowed, Other, or Guest. IB segments key on this attribute.
 
             Phase 3 — Segments
-              Creates three organization segments:
+              Default: creates three organization segments:
                 SEG_A_GUESTS           — CustomAttribute1 -eq 'Guest'
                 SEG_B_INTERNAL_ALLOWED — CustomAttribute1 -eq 'Allowed'
                 SEG_C_INTERNAL_OTHER   — CustomAttribute1 -eq 'Other'
 
-            Phase 4 — Policies and enforcement
-              Default (four symmetric IB policies):
-                Block-Guest-To-Internal-Other    (SEG_A_GUESTS      blocks SEG_C_INTERNAL_OTHER)
-                Allow-Guest-To-Team              (SEG_A_GUESTS      allows SEG_A_GUESTS + SEG_B_INTERNAL_ALLOWED)
-                Block-InternalOther-To-Guest     (SEG_C_INTERNAL_OTHER   blocks SEG_A_GUESTS)
-                Allow-InternalAllowed-To-Guest   (SEG_B_INTERNAL_ALLOWED allows SEG_A_GUESTS + SEG_B_INTERNAL_ALLOWED)
+              With -IsolateGuestDomains: creates one segment per unique guest domain plus SEG_B
+              and SEG_C (SEG_A_GUESTS is not created):
+                SEG_GUEST_<DOMAIN>     — CustomAttribute1 -eq 'Guest_<domain>'
+                SEG_B_INTERNAL_ALLOWED — CustomAttribute1 -eq 'Allowed'
+                SEG_C_INTERNAL_OTHER   — CustomAttribute1 -eq 'Other'
 
-              With -AllowInternalCommunication (five symmetric IB policies — adds B<->C communication):
-                Block-Guest-To-Internal-Other    (SEG_A_GUESTS      blocks SEG_C_INTERNAL_OTHER)
-                Allow-Guest-To-Team              (SEG_A_GUESTS      allows SEG_A_GUESTS + SEG_B_INTERNAL_ALLOWED)
+            Phase 4 — Policies and enforcement
+              Microsoft Purview enforces ONE policy per segment. An Allow policy implicitly
+              blocks all segments not listed as targets, so no separate Block policy is
+              ever needed on the same segment. Block policies are used only where a segment
+              has no other Allow restrictions (e.g. SEG_C in the default mode).
+
+              Default (three IB policies — one per segment):
+                Allow-Guest-To-Team              (SEG_A_GUESTS           allows SEG_A_GUESTS + SEG_B_INTERNAL_ALLOWED)
+                Allow-InternalAllowed-To-Guest   (SEG_B_INTERNAL_ALLOWED allows SEG_A_GUESTS + SEG_B_INTERNAL_ALLOWED)
                 Block-InternalOther-To-Guest     (SEG_C_INTERNAL_OTHER   blocks SEG_A_GUESTS)
+
+              With -AllowInternalCommunication (three IB policies — one per segment):
+                Allow-Guest-To-Team              (SEG_A_GUESTS           allows SEG_A_GUESTS + SEG_B_INTERNAL_ALLOWED)
                 Allow-InternalAllowed-To-All     (SEG_B_INTERNAL_ALLOWED allows SEG_A_GUESTS + SEG_B_INTERNAL_ALLOWED + SEG_C_INTERNAL_OTHER)
                 Allow-InternalOther-To-Allowed   (SEG_C_INTERNAL_OTHER   allows SEG_B_INTERNAL_ALLOWED + SEG_C_INTERNAL_OTHER)
               Calls Start-InformationBarrierPoliciesApplication to begin enforcement.
+
+              With -IsolateGuestDomains, SEG_A_GUESTS is replaced by a per-domain segment for
+              each unique external guest domain (e.g. SEG_GUEST_CONTOSO_COM for contoso.com guests).
+              Each guest-domain segment is given an Allow policy that permits communication only with
+              itself and SEG_B_INTERNAL_ALLOWED. Because IB Allow policies restrict a segment to
+              ONLY the listed targets, guests from different external domains are implicitly blocked
+              from each other — enforcing a strict one-external-domain-per-team rule.
 
             A timestamped log file is always written to -LogDirectory for every run.
 
@@ -124,6 +139,17 @@ function New-TeamsInformationBarriersSetup {
             NOTE: Because SEG_B can communicate with both guests (SEG_A) and SEG_C, and SEG_C can
             communicate with SEG_B, data isolation is weakened in shared spaces such as Teams
             channels and meetings. Evaluate this against your compliance requirements before use.
+
+        .PARAMETER IsolateGuestDomains
+            When specified, each unique external guest domain receives its own organization
+            segment (e.g. SEG_GUEST_CONTOSO_COM for contoso.com) instead of the single flat
+            SEG_A_GUESTS segment. Each guest-domain segment receives an Allow policy that restricts
+            it to communicating only with itself and SEG_B_INTERNAL_ALLOWED. Because IB Allow
+            policies restrict a segment to ONLY the listed targets, guests from different external
+            domains are implicitly blocked from each other without requiring separate Block policies.
+            This satisfies the one-policy-per-segment rule and enforces a strict
+            one-external-domain-per-team rule. The flat SEG_A_GUESTS segment is not created when
+            this switch is set.
 
         .EXAMPLE
             New-TeamsInformationBarriersSetup `
@@ -209,8 +235,8 @@ function New-TeamsInformationBarriersSetup {
             AllowedUserCount [int]      Number of internal users in the Allowed segment
             OtherUserCount   [int]      Number of internal users in the Other segment
             GuestCount       [int]      Number of guest users processed
-            Segments         [string[]] Names of the three organization segments created
-            Policies         [string[]] Names of the four IB policies created
+            Segments         [string[]] Names of the organization segments created
+            Policies         [string[]] Names of the IB policies created
 
         .NOTES
             REQUIRED MODULES (installed automatically if missing):
@@ -237,6 +263,21 @@ function New-TeamsInformationBarriersSetup {
             in Exchange Online as either a Mailbox (licensed) or MailUser (unlicensed) object.
             The command polls up to 3 minutes (6 x 30s) per user. Use -SkipProvisioningWait to
             bypass the poll and continue immediately.
+
+            PREREQUISITES BEFORE FIRST RUN:
+              1. SCOPED DIRECTORY SEARCH: Must be enabled in the Teams admin center
+                 (Teams > Teams settings > search scope). Wait at least a few hours after
+                 enabling before running this command.
+                 See: https://learn.microsoft.com/en-us/purview/information-barriers-policies
+              2. TEAMS OPEN MODE: Teams groups created BEFORE IB was enabled are in Open mode
+                 and will NOT enforce IB policies. After running this command, update all
+                 existing Teams groups from Open to Implicit mode using the Microsoft script:
+                 https://learn.microsoft.com/en-us/purview/information-barriers-teams-powershell-script
+              3. IB MODE: Run Get-PolicyConfig in Security and Compliance PowerShell to verify
+                 your tenant is in SingleSegment or MultiSegment mode. Legacy mode supports
+                 only 250 segments (vs 5,000) and restricts users to one segment.
+              4. FEDERATION: IB policies do NOT apply to federated (external org) users.
+                 Guest accounts invited via Microsoft Entra B2B are covered; direct federation is not.
     #>
 
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
@@ -307,7 +348,11 @@ function New-TeamsInformationBarriersSetup {
 
         [Parameter()]
         [switch]
-        $AllowInternalCommunication
+        $AllowInternalCommunication,
+
+        [Parameter()]
+        [switch]
+        $IsolateGuestDomains
     )
 
     begin {
@@ -380,6 +425,16 @@ function New-TeamsInformationBarriersSetup {
 
         $TenantDomain = $UserPrincipalName.Split('@')[1]
         $GuestEmails = $GuestNames
+
+        # Precompute per-domain data used throughout process when -IsolateGuestDomains is set.
+        $guestDomains      = @()
+        $guestSegmentNames = [System.Collections.Generic.List[string]]::new()
+        if ($IsolateGuestDomains) {
+            $guestDomains = @($GuestEmails | ForEach-Object { $_.Split('@')[1] } | Select-Object -Unique | Sort-Object)
+            foreach ($d in $guestDomains) {
+                $guestSegmentNames.Add("SEG_GUEST_$(ConvertTo-SafeSegmentSuffix -Domain $d)")
+            }
+        }
 
         if ($PSBoundParameters.ContainsKey('Password')) {
             $TestUserPassword = ConvertTo-SecureString -String $Password -AsPlainText -Force
@@ -521,11 +576,20 @@ function New-TeamsInformationBarriersSetup {
                 Write-ToLogFile -StringObject "$(Get-TimeStamp) ERROR: Could not resolve EXO recipient for guest '$g'. Ensure guest exists as a recipient in EXO, then re-run." -LogFile $script:TIBS_LogFile -ForegroundColor Red
                 continue
             }
-            Set-CustomAttribute1-Safe -Identity $guestIdentity -Value $AttrGuest -Cmdlet $PSCmdlet
+            $guestAttrValue = if ($IsolateGuestDomains) {
+                "${AttrGuest}_$($g.Split('@')[1] -replace '\.', '_')"
+            } else {
+                $AttrGuest
+            }
+            Set-CustomAttribute1-Safe -Identity $guestIdentity -Value $guestAttrValue -Cmdlet $PSCmdlet
         }
 
         Write-ToLogFile -StringObject "$(Get-TimeStamp) Phase 2 - Validate attributes (Exchange)" -LogFile $script:TIBS_LogFile -ForegroundColor Cyan
-        $attrValues = @($AttrGuest, $AttrAllowed, $AttrOther)
+        $attrValues = if ($IsolateGuestDomains) {
+            @($AttrAllowed, $AttrOther) + @($guestDomains | ForEach-Object { "${AttrGuest}_$($_ -replace '\.', '_')" })
+        } else {
+            @($AttrGuest, $AttrAllowed, $AttrOther)
+        }
         @(
             Get-Mailbox  -ResultSize Unlimited | Select-Object Name, UserPrincipalName, CustomAttribute1
             Get-MailUser -ResultSize Unlimited | Select-Object Name, UserPrincipalName, CustomAttribute1
@@ -535,7 +599,7 @@ function New-TeamsInformationBarriersSetup {
 
         Write-ToLogFile -StringObject "$(Get-TimeStamp) Phase 1 (continued) - Connect to Security & Compliance PowerShell (IPPSSession)" -LogFile $script:TIBS_LogFile -ForegroundColor Cyan
         try {
-            Connect-IPPSSession -ErrorAction Stop | Out-Null
+            Connect-IPPSSession -UserPrincipalName $UserPrincipalName -ErrorAction Stop | Out-Null
             Write-ToLogFile -StringObject "$(Get-TimeStamp) Connected to Security & Compliance PowerShell." -LogFile $script:TIBS_LogFile
         }
         catch {
@@ -544,7 +608,15 @@ function New-TeamsInformationBarriersSetup {
         }
 
         Write-ToLogFile -StringObject "$(Get-TimeStamp) Phase 2 - Create IB segments (based on CustomAttribute1)" -LogFile $script:TIBS_LogFile -ForegroundColor Cyan
-        Get-OrCreateOrganizationSegment -Name "SEG_A_GUESTS"           -Filter "CustomAttribute1 -eq '$AttrGuest'"   -Cmdlet $PSCmdlet | Out-Null
+        if ($IsolateGuestDomains) {
+            foreach ($domain in $guestDomains) {
+                $guestAttr = "${AttrGuest}_$($domain -replace '\.', '_')"
+                $segName   = "SEG_GUEST_$(ConvertTo-SafeSegmentSuffix -Domain $domain)"
+                Get-OrCreateOrganizationSegment -Name $segName -Filter "CustomAttribute1 -eq '$guestAttr'" -Cmdlet $PSCmdlet | Out-Null
+            }
+        } else {
+            Get-OrCreateOrganizationSegment -Name "SEG_A_GUESTS"           -Filter "CustomAttribute1 -eq '$AttrGuest'"   -Cmdlet $PSCmdlet | Out-Null
+        }
         Get-OrCreateOrganizationSegment -Name "SEG_B_INTERNAL_ALLOWED" -Filter "CustomAttribute1 -eq '$AttrAllowed'" -Cmdlet $PSCmdlet | Out-Null
         Get-OrCreateOrganizationSegment -Name "SEG_C_INTERNAL_OTHER"   -Filter "CustomAttribute1 -eq '$AttrOther'"   -Cmdlet $PSCmdlet | Out-Null
 
@@ -553,35 +625,71 @@ function New-TeamsInformationBarriersSetup {
 
         Write-ToLogFile -StringObject "$(Get-TimeStamp) Phase 3 - Create IB policies (inactive first)" -LogFile $script:TIBS_LogFile -ForegroundColor Cyan
         # Policies must be symmetric: every segment referenced as a target must also have its own assigned policy.
-        # SEG_A_GUESTS policies (what guests can/cannot communicate with) — same for both modes
-        Get-OrCreateInformationBarrierPolicy -Name "Block-Guest-To-Internal-Other"       -AssignedSegment "SEG_A_GUESTS"           -Mode "Blocked" -Targets @("SEG_C_INTERNAL_OTHER")                                                       -Cmdlet $PSCmdlet | Out-Null
-        Get-OrCreateInformationBarrierPolicy -Name "Allow-Guest-To-Team"                 -AssignedSegment "SEG_A_GUESTS"           -Mode "Allowed" -Targets @("SEG_A_GUESTS", "SEG_B_INTERNAL_ALLOWED")                               -Cmdlet $PSCmdlet | Out-Null
-        # SEG_C_INTERNAL_OTHER: block guests — same for both modes
-        Get-OrCreateInformationBarrierPolicy -Name "Block-InternalOther-To-Guest"        -AssignedSegment "SEG_C_INTERNAL_OTHER"   -Mode "Blocked" -Targets @("SEG_A_GUESTS")                                                            -Cmdlet $PSCmdlet | Out-Null
-        if ($AllowInternalCommunication) {
-            Write-ToLogFile -StringObject "$(Get-TimeStamp) -AllowInternalCommunication specified: creating extended policy set (B<->C communication allowed)." -LogFile $script:TIBS_LogFile -ForegroundColor Yellow
-            # SEG_B: allowed team communicates with guests, each other, AND other internal segment
-            Get-OrCreateInformationBarrierPolicy -Name "Allow-InternalAllowed-To-All"     -AssignedSegment "SEG_B_INTERNAL_ALLOWED" -Mode "Allowed" -Targets @("SEG_A_GUESTS", "SEG_B_INTERNAL_ALLOWED", "SEG_C_INTERNAL_OTHER") -Cmdlet $PSCmdlet | Out-Null
-            # SEG_C: other internal segment communicates with allowed team and each other (symmetric)
-            Get-OrCreateInformationBarrierPolicy -Name "Allow-InternalOther-To-Allowed"   -AssignedSegment "SEG_C_INTERNAL_OTHER"   -Mode "Allowed" -Targets @("SEG_B_INTERNAL_ALLOWED", "SEG_C_INTERNAL_OTHER")                    -Cmdlet $PSCmdlet | Out-Null
+        $activePolicyNames = [System.Collections.Generic.List[string]]::new()
+
+        if ($IsolateGuestDomains) {
+            Write-ToLogFile -StringObject "$(Get-TimeStamp) -IsolateGuestDomains specified: creating per-domain guest segment policies." -LogFile $script:TIBS_LogFile -ForegroundColor Yellow
+            # Each guest-domain segment allows only itself + SEG_B_INTERNAL_ALLOWED.
+            # A guest from domain A is therefore blocked from sharing a team with a guest from domain B.
+            foreach ($segName in $guestSegmentNames) {
+                $policyName = "Allow-$segName-To-Team"
+                Get-OrCreateInformationBarrierPolicy -Name $policyName -AssignedSegment $segName -Mode "Allowed" -Targets @($segName, "SEG_B_INTERNAL_ALLOWED") -Cmdlet $PSCmdlet | Out-Null
+                $activePolicyNames.Add($policyName)
+            }
+            # SEG_B: allowed-internal communicates with all guest-domain segments and itself.
+            $segBTargets = @($guestSegmentNames) + @("SEG_B_INTERNAL_ALLOWED")
+            if ($AllowInternalCommunication) {
+                Write-ToLogFile -StringObject "$(Get-TimeStamp) -AllowInternalCommunication specified: creating extended policy set (B<->C communication allowed)." -LogFile $script:TIBS_LogFile -ForegroundColor Yellow
+                $segBTargets += "SEG_C_INTERNAL_OTHER"
+                Get-OrCreateInformationBarrierPolicy -Name "Allow-InternalAllowed-To-All"   -AssignedSegment "SEG_B_INTERNAL_ALLOWED" -Mode "Allowed" -Targets $segBTargets                                       -Cmdlet $PSCmdlet | Out-Null
+                $activePolicyNames.Add("Allow-InternalAllowed-To-All")
+                # SEG_C allows SEG_B + itself — implicitly blocks all guest-domain segments.
+                Get-OrCreateInformationBarrierPolicy -Name "Allow-InternalOther-To-Allowed" -AssignedSegment "SEG_C_INTERNAL_OTHER"   -Mode "Allowed" -Targets @("SEG_B_INTERNAL_ALLOWED", "SEG_C_INTERNAL_OTHER") -Cmdlet $PSCmdlet | Out-Null
+                $activePolicyNames.Add("Allow-InternalOther-To-Allowed")
+            }
+            else {
+                Get-OrCreateInformationBarrierPolicy -Name "Allow-InternalAllowed-To-AllGuests" -AssignedSegment "SEG_B_INTERNAL_ALLOWED" -Mode "Allowed" -Targets $segBTargets              -Cmdlet $PSCmdlet | Out-Null
+                $activePolicyNames.Add("Allow-InternalAllowed-To-AllGuests")
+                # SEG_C: Allow only SEG_B + itself. Because this is an Allow policy, all guest-domain
+                # segments are implicitly blocked (IB Allow = "communicate with ONLY these targets").
+                # One policy per segment rule is satisfied — no separate Block policy needed.
+                Get-OrCreateInformationBarrierPolicy -Name "Allow-InternalOther-To-Allowed"     -AssignedSegment "SEG_C_INTERNAL_OTHER"   -Mode "Allowed" -Targets @("SEG_B_INTERNAL_ALLOWED", "SEG_C_INTERNAL_OTHER") -Cmdlet $PSCmdlet | Out-Null
+                $activePolicyNames.Add("Allow-InternalOther-To-Allowed")
+            }
         }
         else {
-            # SEG_B: allowed team communicates with guests and each other only (default isolation)
-            Get-OrCreateInformationBarrierPolicy -Name "Allow-InternalAllowed-To-Guest"   -AssignedSegment "SEG_B_INTERNAL_ALLOWED" -Mode "Allowed" -Targets @("SEG_A_GUESTS", "SEG_B_INTERNAL_ALLOWED")                              -Cmdlet $PSCmdlet | Out-Null
+            # Standard flat-guest policies using SEG_A_GUESTS.
+            # Microsoft Purview one-policy-per-segment rule: an Allow policy implicitly blocks
+            # all segments not in its target list — no separate Block policy on the same segment.
+
+            # SEG_A: ONE Allow policy. SEG_C is implicitly blocked (not listed).
+            Get-OrCreateInformationBarrierPolicy -Name "Allow-Guest-To-Team"               -AssignedSegment "SEG_A_GUESTS"           -Mode "Allowed" -Targets @("SEG_A_GUESTS", "SEG_B_INTERNAL_ALLOWED")                      -Cmdlet $PSCmdlet | Out-Null
+            $activePolicyNames.Add("Allow-Guest-To-Team")
+            if ($AllowInternalCommunication) {
+                Write-ToLogFile -StringObject "$(Get-TimeStamp) -AllowInternalCommunication specified: creating extended policy set (B<->C communication allowed)." -LogFile $script:TIBS_LogFile -ForegroundColor Yellow
+                # SEG_B: Allow guests + other allowed + other internal.
+                Get-OrCreateInformationBarrierPolicy -Name "Allow-InternalAllowed-To-All"   -AssignedSegment "SEG_B_INTERNAL_ALLOWED" -Mode "Allowed" -Targets @("SEG_A_GUESTS", "SEG_B_INTERNAL_ALLOWED", "SEG_C_INTERNAL_OTHER") -Cmdlet $PSCmdlet | Out-Null
+                $activePolicyNames.Add("Allow-InternalAllowed-To-All")
+                # SEG_C: ONE Allow policy. SEG_A (guests) implicitly blocked (not listed).
+                Get-OrCreateInformationBarrierPolicy -Name "Allow-InternalOther-To-Allowed" -AssignedSegment "SEG_C_INTERNAL_OTHER"   -Mode "Allowed" -Targets @("SEG_B_INTERNAL_ALLOWED", "SEG_C_INTERNAL_OTHER")                  -Cmdlet $PSCmdlet | Out-Null
+                $activePolicyNames.Add("Allow-InternalOther-To-Allowed")
+            }
+            else {
+                # SEG_B: Allow only guests + other allowed internals.
+                Get-OrCreateInformationBarrierPolicy -Name "Allow-InternalAllowed-To-Guest" -AssignedSegment "SEG_B_INTERNAL_ALLOWED" -Mode "Allowed" -Targets @("SEG_A_GUESTS", "SEG_B_INTERNAL_ALLOWED")                              -Cmdlet $PSCmdlet | Out-Null
+                $activePolicyNames.Add("Allow-InternalAllowed-To-Guest")
+                # SEG_C: ONE Block policy — blocks SEG_A. SEG_C has no other comms restriction
+                # in default mode, so a Block is sufficient; no Allow policy conflicts.
+                Get-OrCreateInformationBarrierPolicy -Name "Block-InternalOther-To-Guest"   -AssignedSegment "SEG_C_INTERNAL_OTHER"   -Mode "Blocked" -Targets @("SEG_A_GUESTS")                                                   -Cmdlet $PSCmdlet | Out-Null
+                $activePolicyNames.Add("Block-InternalOther-To-Guest")
+            }
         }
         Write-ToLogFile -StringObject "$(Get-TimeStamp) Policies created:" -LogFile $script:TIBS_LogFile -ForegroundColor Green
         Get-InformationBarrierPolicy | Format-Table Name, State, AssignedSegment, Segments* -Auto
 
         Write-ToLogFile -StringObject "$(Get-TimeStamp) Phase 4 - Activate policies" -LogFile $script:TIBS_LogFile -ForegroundColor Cyan
-        Set-InformationBarrierPolicyActive -Name "Block-Guest-To-Internal-Other"    -Cmdlet $PSCmdlet
-        Set-InformationBarrierPolicyActive -Name "Allow-Guest-To-Team"              -Cmdlet $PSCmdlet
-        Set-InformationBarrierPolicyActive -Name "Block-InternalOther-To-Guest"     -Cmdlet $PSCmdlet
-        if ($AllowInternalCommunication) {
-            Set-InformationBarrierPolicyActive -Name "Allow-InternalAllowed-To-All"    -Cmdlet $PSCmdlet
-            Set-InformationBarrierPolicyActive -Name "Allow-InternalOther-To-Allowed"  -Cmdlet $PSCmdlet
-        }
-        else {
-            Set-InformationBarrierPolicyActive -Name "Allow-InternalAllowed-To-Guest"  -Cmdlet $PSCmdlet
+        foreach ($policyName in $activePolicyNames) {
+            Set-InformationBarrierPolicyActive -Name $policyName -Cmdlet $PSCmdlet
         }
         Write-ToLogFile -StringObject "$(Get-TimeStamp) Policies active:" -LogFile $script:TIBS_LogFile -ForegroundColor Green
         Get-InformationBarrierPolicy | Format-Table Name, State, AssignedSegment, Segments* -Auto
@@ -604,7 +712,13 @@ function New-TeamsInformationBarriersSetup {
 
         Write-ToLogFile -StringObject "$(Get-TimeStamp) Validate Guest vs Allowed Internal:" -LogFile $script:TIBS_LogFile -ForegroundColor Yellow
         try {
-            Get-InformationBarrierRecipientStatus -Identity $GuestEmails[0] -Identity2 $validateAllowedUpn -ErrorAction Stop
+            # Get-ExoInformationBarrierRelationship is the current recommended cmdlet (EXO PowerShell).
+            # Get-InformationBarrierRecipientStatus is the legacy S&C PowerShell equivalent.
+            if (Get-Command -Name 'Get-ExoInformationBarrierRelationship' -ErrorAction SilentlyContinue) {
+                Get-ExoInformationBarrierRelationship -RecipientId1 $GuestEmails[0] -RecipientId2 $validateAllowedUpn -ErrorAction Stop
+            } else {
+                Get-InformationBarrierRecipientStatus -Identity $GuestEmails[0] -Identity2 $validateAllowedUpn -ErrorAction Stop
+            }
         }
         catch {
             Write-ToLogFile -StringObject "$(Get-TimeStamp) ERROR: Recipient status check failed. Error: $($_.Exception.Message)" -LogFile $script:TIBS_LogFile -ForegroundColor Red
@@ -612,11 +726,34 @@ function New-TeamsInformationBarriersSetup {
         }
         Write-ToLogFile -StringObject "$(Get-TimeStamp) Validate Guest vs Other Internal:" -LogFile $script:TIBS_LogFile -ForegroundColor Yellow
         try {
-            Get-InformationBarrierRecipientStatus -Identity $GuestEmails[0] -Identity2 $validateOtherUpn -ErrorAction Stop
+            if (Get-Command -Name 'Get-ExoInformationBarrierRelationship' -ErrorAction SilentlyContinue) {
+                Get-ExoInformationBarrierRelationship -RecipientId1 $GuestEmails[0] -RecipientId2 $validateOtherUpn -ErrorAction Stop
+            } else {
+                Get-InformationBarrierRecipientStatus -Identity $GuestEmails[0] -Identity2 $validateOtherUpn -ErrorAction Stop
+            }
         }
         catch {
             Write-ToLogFile -StringObject "$(Get-TimeStamp) ERROR: Recipient status check failed. Error: $($_.Exception.Message)" -LogFile $script:TIBS_LogFile -ForegroundColor Red
             Write-Warning "[InformationBarrier] Recipient status check failed. Error: $($_.Exception.Message)"
+        }
+
+        if ($IsolateGuestDomains -and $guestDomains.Count -ge 2) {
+            $d1Guests = @($GuestEmails | Where-Object { $_.Split('@')[1] -eq $guestDomains[0] })
+            $d2Guests = @($GuestEmails | Where-Object { $_.Split('@')[1] -eq $guestDomains[1] })
+            if ($d1Guests.Count -gt 0 -and $d2Guests.Count -gt 0) {
+                Write-ToLogFile -StringObject "$(Get-TimeStamp) Validate cross-domain guest isolation ($($guestDomains[0]) vs $($guestDomains[1])):" -LogFile $script:TIBS_LogFile -ForegroundColor Yellow
+                try {
+                    if (Get-Command -Name 'Get-ExoInformationBarrierRelationship' -ErrorAction SilentlyContinue) {
+                        Get-ExoInformationBarrierRelationship -RecipientId1 $d1Guests[0] -RecipientId2 $d2Guests[0] -ErrorAction Stop
+                    } else {
+                        Get-InformationBarrierRecipientStatus -Identity $d1Guests[0] -Identity2 $d2Guests[0] -ErrorAction Stop
+                    }
+                }
+                catch {
+                    Write-ToLogFile -StringObject "$(Get-TimeStamp) ERROR: Cross-domain recipient status check failed. Error: $($_.Exception.Message)" -LogFile $script:TIBS_LogFile -ForegroundColor Red
+                    Write-Warning "[InformationBarrier] Cross-domain recipient status check failed. Error: $($_.Exception.Message)"
+                }
+            }
         }
 
         # Return key artifacts so callers can inspect results programmatically.
@@ -626,12 +763,12 @@ function New-TeamsInformationBarriersSetup {
             AllowedUserCount = @($allowedUsers).Count
             OtherUserCount   = @($otherUsers).Count
             GuestCount       = @($GuestEmails).Count
-            Segments         = @("SEG_A_GUESTS", "SEG_B_INTERNAL_ALLOWED", "SEG_C_INTERNAL_OTHER")
-            Policies         = if ($AllowInternalCommunication) {
-                                   @("Block-Guest-To-Internal-Other", "Allow-Guest-To-Team", "Block-InternalOther-To-Guest", "Allow-InternalAllowed-To-All", "Allow-InternalOther-To-Allowed")
+            Segments         = if ($IsolateGuestDomains) {
+                                   @($guestSegmentNames) + @("SEG_B_INTERNAL_ALLOWED", "SEG_C_INTERNAL_OTHER")
                                } else {
-                                   @("Block-Guest-To-Internal-Other", "Allow-Guest-To-Team", "Block-InternalOther-To-Guest", "Allow-InternalAllowed-To-Guest")
+                                   @("SEG_A_GUESTS", "SEG_B_INTERNAL_ALLOWED", "SEG_C_INTERNAL_OTHER")
                                }
+            Policies         = @($activePolicyNames)
         }
     }
 

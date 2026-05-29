@@ -48,6 +48,24 @@ function Convert-ToODataLiteral {
     return $Value.Replace("'", "''")
 }
 
+function ConvertTo-SafeSegmentSuffix {
+    <#
+    .SYNOPSIS
+        Converts a domain name into an uppercase alphanumeric suffix safe for use in
+        segment and policy names.
+    .DESCRIPTION
+        Replaces every character that is not A-Z or 0-9 with an underscore and
+        upper-cases the result. Used to derive consistent segment name suffixes from
+        guest domain names (e.g. contoso.com becomes CONTOSO_COM).
+    .PARAMETER Domain
+        The domain string to normalize (e.g. contoso.com).
+    .OUTPUTS
+        System.String
+    #>
+    param([string]$Domain)
+    return ($Domain.ToUpper() -replace '[^A-Z0-9]', '_')
+}
+
 function Get-OrCreateInternalUser {
     <#
     .SYNOPSIS
