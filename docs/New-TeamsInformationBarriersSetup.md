@@ -29,6 +29,8 @@ New-TeamsInformationBarriersSetup
     [-ShowBanner <Boolean>]
     [-StayConnected]
     [-SkipProvisioningWait]
+    [-AllowInternalCommunication]
+    [-IsolateGuestDomains]
     [-WhatIf]
     [-Confirm]
     [<CommonParameters>]
@@ -61,7 +63,7 @@ existing users, groups, segments, and policies are detected and reused when pres
 
 ### Phase 3 — Segments
 
-Creates three organization segments:
+**Default:** creates three organization segments:
 
 | Segment | Filter |
 | --- | --- |
@@ -69,16 +71,41 @@ Creates three organization segments:
 | `SEG_B_INTERNAL_ALLOWED` | `CustomAttribute1 -eq 'Allowed'` |
 | `SEG_C_INTERNAL_OTHER` | `CustomAttribute1 -eq 'Other'` |
 
+**With `-IsolateGuestDomains`:** one segment per unique guest domain plus SEG_B and SEG_C
+(`SEG_A_GUESTS` is not created):
+
+| Segment | Filter |
+| --- | --- |
+| `SEG_GUEST_<DOMAIN>` | `CustomAttribute1 -eq 'Guest_<domain>'` |
+| `SEG_B_INTERNAL_ALLOWED` | `CustomAttribute1 -eq 'Allowed'` |
+| `SEG_C_INTERNAL_OTHER` | `CustomAttribute1 -eq 'Other'` |
+
 ### Phase 4 — Policies and enforcement
 
-Creates and activates four symmetric IB policies:
+Microsoft Purview enforces **one policy per segment**. An Allow policy implicitly blocks all
+segments not listed as targets — no separate Block policy is needed on the same segment.
+
+**Default** (three IB policies — one per segment):
 
 | Policy | AssignedSegment | Mode | Targets |
 | --- | --- | --- | --- |
-| `Block-Guest-To-Internal-Other` | SEG_A_GUESTS | Blocked | SEG_C_INTERNAL_OTHER |
 | `Allow-Guest-To-Team` | SEG_A_GUESTS | Allowed | SEG_A_GUESTS, SEG_B_INTERNAL_ALLOWED |
-| `Block-InternalOther-To-Guest` | SEG_C_INTERNAL_OTHER | Blocked | SEG_A_GUESTS |
 | `Allow-InternalAllowed-To-Guest` | SEG_B_INTERNAL_ALLOWED | Allowed | SEG_A_GUESTS, SEG_B_INTERNAL_ALLOWED |
+| `Block-InternalOther-To-Guest` | SEG_C_INTERNAL_OTHER | Blocked | SEG_A_GUESTS |
+
+**With `-AllowInternalCommunication`** (three IB policies — one per segment):
+
+| Policy | AssignedSegment | Mode | Targets |
+| --- | --- | --- | --- |
+| `Allow-Guest-To-Team` | SEG_A_GUESTS | Allowed | SEG_A_GUESTS, SEG_B_INTERNAL_ALLOWED |
+| `Allow-InternalAllowed-To-All` | SEG_B_INTERNAL_ALLOWED | Allowed | SEG_A_GUESTS, SEG_B_INTERNAL_ALLOWED, SEG_C_INTERNAL_OTHER |
+| `Allow-InternalOther-To-Allowed` | SEG_C_INTERNAL_OTHER | Allowed | SEG_B_INTERNAL_ALLOWED, SEG_C_INTERNAL_OTHER |
+
+**With `-IsolateGuestDomains`** (N+2 policies, one per segment, where N = unique guest domains):
+One `Allow-SEG_GUEST_<DOMAIN>-To-Team` policy per domain segment, one policy for SEG_B
+(`Allow-InternalAllowed-To-AllGuests`), and one for SEG_C (`Allow-InternalOther-To-Allowed`).
+Each domain segment is restricted to itself and SEG_B — guests from different domains are
+implicitly blocked from each other.
 
 Calls `Start-InformationBarrierPoliciesApplication` to begin enforcement.
 
@@ -161,6 +188,40 @@ TIBS `
 ```
 
 Same as Example 1 using the `TIBS` alias.
+
+### Example 6: Allow internal segments to communicate
+
+```powershell
+New-TeamsInformationBarriersSetup `
+    -UserPrincipalName admin@contoso.onmicrosoft.com `
+    -GuestNames user1@company.com,user2@company.com `
+    -Password "CreateYourPassword" `
+    -AllowedInternalAliases AllowedUser1,AllowedUser2 `
+    -OtherInternalAliases InternalUserName1,InternalUserName2 `
+    -AllowInternalCommunication `
+    -SkipProvisioningWait
+```
+
+Same as Example 1 but adds policies that allow `SEG_B_INTERNAL_ALLOWED` and
+`SEG_C_INTERNAL_OTHER` to communicate directly with each other. Guest isolation
+from Other Internal is preserved.
+
+### Example 7: Enforce one external domain per team
+
+```powershell
+New-TeamsInformationBarriersSetup `
+    -UserPrincipalName admin@contoso.onmicrosoft.com `
+    -GuestNames guest1@fabrikam.com,guest1@litware.com `
+    -Password "CreateYourPassword" `
+    -AllowedInternalAliases AllowedUser1,AllowedUser2 `
+    -OtherInternalAliases InternalUserName1,InternalUserName2 `
+    -IsolateGuestDomains `
+    -SkipProvisioningWait
+```
+
+Creates a dedicated IB segment per unique external guest domain (`SEG_GUEST_FABRIKAM_COM`,
+`SEG_GUEST_LITWARE_COM`). Guests from different domains cannot communicate with each other.
+Satisfies a strict one-external-domain-per-team requirement.
 
 ## PARAMETERS
 
@@ -393,6 +454,45 @@ Accept pipeline input: False
 Accept wildcard characters: False
 ```
 
+### -AllowInternalCommunication
+
+When specified, creates an alternative policy set that allows `SEG_B_INTERNAL_ALLOWED` and
+`SEG_C_INTERNAL_OTHER` to communicate directly with each other in addition to their default
+rights. Guest isolation from `SEG_C` is preserved.
+
+> **Note:** Because SEG_B bridges guests (SEG_A) and SEG_C, data isolation is weakened in
+> shared spaces (Teams channels, meetings). Evaluate against your compliance requirements.
+
+```yaml
+Type: SwitchParameter
+Parameter Sets: (All)
+Aliases:
+Required: False
+Position: Named
+Default value: False
+Accept pipeline input: False
+Accept wildcard characters: False
+```
+
+### -IsolateGuestDomains
+
+When specified, each unique external guest domain receives its own organization segment
+(e.g. `SEG_GUEST_FABRIKAM_COM` for `fabrikam.com`) instead of the single flat `SEG_A_GUESTS`
+segment. Each domain segment gets an Allow policy scoped to itself and `SEG_B_INTERNAL_ALLOWED`.
+Guests from different domains are implicitly blocked from each other, enforcing a strict
+one-external-domain-per-team rule without requiring separate Block policies.
+
+```yaml
+Type: SwitchParameter
+Parameter Sets: (All)
+Aliases:
+Required: False
+Position: Named
+Default value: False
+Accept pipeline input: False
+Accept wildcard characters: False
+```
+
 ### -WhatIf
 
 Shows what would happen if the command runs without making changes.
@@ -449,10 +549,23 @@ Returns a summary object with the following properties:
 | `AllowedUserCount` | Int | Number of internal users in the Allowed segment |
 | `OtherUserCount` | Int | Number of internal users in the Other segment |
 | `GuestCount` | Int | Number of guest users processed |
-| `Segments` | String[] | Names of the three organization segments created |
-| `Policies` | String[] | Names of the four IB policies created |
+| `Segments` | String[] | Names of the organization segments created |
+| `Policies` | String[] | Names of the IB policies created |
 
 ## NOTES
+
+**Prerequisites before first run:**
+
+1. **Scoped directory search** must be enabled in the Teams admin center
+   (**Teams settings > Search by name**). Wait at least a few hours after enabling.
+   See: [information-barriers-policies](https://learn.microsoft.com/en-us/purview/information-barriers-policies)
+2. **Teams Open mode**: Teams groups created before IB was enabled are in Open mode and will
+   not enforce IB policies until updated to Implicit mode using the
+   [Microsoft mode-update script](https://learn.microsoft.com/en-us/purview/information-barriers-teams-powershell-script).
+3. **IB mode**: verify your tenant is in SingleSegment or MultiSegment mode
+   (`Get-PolicyConfig` in Security & Compliance PowerShell). Legacy mode limits you to 250 segments.
+4. **Federation**: IB policies do NOT apply to federated external users. Only B2B guests
+   invited via Microsoft Entra are covered.
 
 **Required modules** (installed automatically from PSGallery if missing):
 
@@ -493,4 +606,5 @@ the poll when users already have Exchange Online objects.
 - [New-InformationBarrierPolicy](https://learn.microsoft.com/en-us/powershell/module/exchange/new-informationbarrierpolicy)
 - [New-OrganizationSegment](https://learn.microsoft.com/en-us/powershell/module/exchange/new-organizationsegment)
 - [Start-InformationBarrierPoliciesApplication](https://learn.microsoft.com/en-us/powershell/module/exchange/start-informationbarrierpoliciesapplication)
-- [Get-InformationBarrierRecipientStatus](https://learn.microsoft.com/en-us/powershell/module/exchange/get-informationbarrierrecipientstatus)
+- [Get-ExoInformationBarrierRelationship](https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/get-exoinformationbarrierrelationship)
+- [Get-InformationBarrierRecipientStatus (legacy)](https://learn.microsoft.com/en-us/powershell/module/exchange/get-informationbarrierrecipientstatus)

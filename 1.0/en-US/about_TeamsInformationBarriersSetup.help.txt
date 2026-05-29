@@ -38,18 +38,37 @@ PHASES
             Guest    - external guest users
 
     Phase 3 - Segments
-        Creates three organization segments keyed on CustomAttribute1:
+        Default: creates three organization segments keyed on CustomAttribute1:
             SEG_A_GUESTS           - CustomAttribute1 -eq 'Guest'
             SEG_B_INTERNAL_ALLOWED - CustomAttribute1 -eq 'Allowed'
             SEG_C_INTERNAL_OTHER   - CustomAttribute1 -eq 'Other'
 
+        With -IsolateGuestDomains: one segment per unique guest domain plus
+        SEG_B and SEG_C (SEG_A_GUESTS is NOT created):
+            SEG_GUEST_DOMAIN       - CustomAttribute1 -eq 'Guest_domain'
+            SEG_B_INTERNAL_ALLOWED - CustomAttribute1 -eq 'Allowed'
+            SEG_C_INTERNAL_OTHER   - CustomAttribute1 -eq 'Other'
+
     Phase 4 - Policies and enforcement
-        Creates four symmetric IB policies (every segment has an assigned
-        policy, satisfying the IB symmetry requirement):
-            Block-Guest-To-Internal-Other    - SEG_A_GUESTS blocks SEG_C_INTERNAL_OTHER
+        Microsoft Purview enforces ONE policy per segment. An Allow policy
+        implicitly blocks all segments not listed as targets, removing the need
+        for redundant Block policies on the same segment.
+
+        Default (three IB policies - one per segment):
             Allow-Guest-To-Team              - SEG_A_GUESTS allows SEG_A + SEG_B
-            Block-InternalOther-To-Guest     - SEG_C_INTERNAL_OTHER blocks SEG_A_GUESTS
             Allow-InternalAllowed-To-Guest   - SEG_B_INTERNAL_ALLOWED allows SEG_A + SEG_B
+            Block-InternalOther-To-Guest     - SEG_C_INTERNAL_OTHER blocks SEG_A_GUESTS
+
+        With -AllowInternalCommunication (three IB policies - one per segment):
+            Allow-Guest-To-Team              - SEG_A_GUESTS allows SEG_A + SEG_B
+            Allow-InternalAllowed-To-All     - SEG_B_INTERNAL_ALLOWED allows SEG_A + SEG_B + SEG_C
+            Allow-InternalOther-To-Allowed   - SEG_C_INTERNAL_OTHER allows SEG_B + SEG_C
+
+        With -IsolateGuestDomains (N+2 policies, one per segment):
+            Allow-SEG_GUEST_DOMAIN-To-Team   - per-domain segment allows itself + SEG_B
+            Allow-InternalAllowed-To-AllGuests - SEG_B allows all guest segments + itself
+            Allow-InternalOther-To-Allowed   - SEG_C allows SEG_B + itself
+
         Activates all policies and calls Start-InformationBarrierPoliciesApplication.
 
 REQUIRED PARAMETERS
@@ -108,6 +127,21 @@ EXAMPLES
         -SkipProvisioningWait
 
 NOTES
+    PREREQUISITES BEFORE FIRST RUN:
+    1. SCOPED DIRECTORY SEARCH: Must be enabled in the Teams admin center
+       (Teams > Teams settings > search scope). Wait at least a few hours
+       after enabling before running this command.
+       See: https://learn.microsoft.com/en-us/purview/information-barriers-policies
+    2. TEAMS OPEN MODE: Teams groups created BEFORE IB was enabled are in Open
+       mode and will NOT enforce IB policies. After running, update all existing
+       groups from Open to Implicit mode:
+       https://learn.microsoft.com/en-us/purview/information-barriers-teams-powershell-script
+    3. IB MODE: Run Get-PolicyConfig in Security & Compliance PowerShell to
+       verify your tenant is in SingleSegment or MultiSegment mode. Legacy mode
+       supports only 250 segments and restricts users to one segment.
+    4. FEDERATION: IB policies do NOT apply to federated external users.
+       Only B2B guest accounts invited via Microsoft Entra B2B are covered.
+
     IB POLICY PROPAGATION: Allow 30-60 minutes after
     Start-InformationBarrierPoliciesApplication runs for enforcement to take
     effect across all Teams conversations. Check progress with:
@@ -128,13 +162,13 @@ NOTES
     VERIFYING IB IN TEAMS: After propagation completes, sign in as a guest or
     internal user and attempt to start a 1:1 chat with a blocked party. Teams
     will show "You can't send messages to this person" for blocked pairs. Use
-    Get-InformationBarrierRecipientStatus to verify programmatically:
-        Get-InformationBarrierRecipientStatus `
-            -Identity guest@external.com `
-            -Identity2 blockeduser@contoso.onmicrosoft.com
+    Get-ExoInformationBarrierRelationship to verify programmatically:
+        Get-ExoInformationBarrierRelationship `
+            -RecipientId1 guest@external.com `
+            -RecipientId2 blockeduser@contoso.onmicrosoft.com
 
 SEE ALSO
     Get-Help New-TeamsInformationBarriersSetup -Full
     https://learn.microsoft.com/en-us/microsoftteams/information-barriers-in-teams
     https://learn.microsoft.com/en-us/powershell/module/exchange/start-informationbarrierpoliciesapplication
-    https://learn.microsoft.com/en-us/powershell/module/exchange/get-informationbarrierrecipientstatus
+    https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/get-exoinformationbarrierrelationship
