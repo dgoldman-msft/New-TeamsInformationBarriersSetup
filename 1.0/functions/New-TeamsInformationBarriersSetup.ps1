@@ -352,7 +352,11 @@ function New-TeamsInformationBarriersSetup {
 
         [Parameter()]
         [switch]
-        $IsolateGuestDomains
+        $IsolateGuestDomains,
+
+        [Parameter()]
+        [switch]
+        $UseDeviceAuthentication
     )
 
     begin {
@@ -439,9 +443,8 @@ function New-TeamsInformationBarriersSetup {
         if ($PSBoundParameters.ContainsKey('Password')) {
             $TestUserPassword = ConvertTo-SecureString -String $Password -AsPlainText -Force
         }
-        elseif (-not $PSBoundParameters.ContainsKey('TestUserPassword')) {
-            $TestUserPassword = Read-Host 'Enter lab password for new internal users' -AsSecureString
-        }
+        # If neither -Password nor -TestUserPassword was supplied, the prompt is deferred to
+        # the process block so it only fires when at least one alias does not already exist.
     }
 
     process {
@@ -464,6 +467,18 @@ function New-TeamsInformationBarriersSetup {
         Write-ToLogFile -StringObject "$(Get-TimeStamp) IB Allow Group Id: $($ibGroup.Id)" -LogFile $script:TIBS_LogFile -ForegroundColor Green
 
         Write-ToLogFile -StringObject "$(Get-TimeStamp) Phase 0 - Create/Get internal users" -LogFile $script:TIBS_LogFile -ForegroundColor Cyan
+
+        # Prompt for password only if at least one alias is absent from the tenant.
+        if (-not $TestUserPassword) {
+            $allAliases = @($AllowedInternalAliases) + @($OtherInternalAliases)
+            $needsCreate = $allAliases | Where-Object {
+                -not (Get-MgUser -UserId "$_@$TenantDomain" -ErrorAction SilentlyContinue)
+            }
+            if ($needsCreate) {
+                $TestUserPassword = Read-Host 'Enter lab password for new internal users' -AsSecureString
+            }
+        }
+
         $allowedUsers = foreach ($a in $AllowedInternalAliases) {
             Get-OrCreateInternalUser -Alias $a -Domain $TenantDomain -SecurePassword $TestUserPassword -Cmdlet $PSCmdlet
         }
@@ -512,7 +527,9 @@ function New-TeamsInformationBarriersSetup {
         }
         else {
             try {
-                Connect-ExchangeOnline -UserPrincipalName $UserPrincipalName -ShowBanner:$ShowBanner -ErrorAction Stop
+                $exoParams = @{ UserPrincipalName = $UserPrincipalName; ShowBanner = $ShowBanner; ErrorAction = 'Stop' }
+                if ($UseDeviceAuthentication) { $exoParams['Device'] = $true }
+                Connect-ExchangeOnline @exoParams
                 Write-ToLogFile -StringObject "$(Get-TimeStamp) Connected to Exchange Online." -LogFile $script:TIBS_LogFile
             }
             catch {
@@ -599,7 +616,9 @@ function New-TeamsInformationBarriersSetup {
 
         Write-ToLogFile -StringObject "$(Get-TimeStamp) Phase 1 (continued) - Connect to Security & Compliance PowerShell (IPPSSession)" -LogFile $script:TIBS_LogFile -ForegroundColor Cyan
         try {
-            Connect-IPPSSession -UserPrincipalName $UserPrincipalName -ErrorAction Stop | Out-Null
+            $ippsParams = @{ UserPrincipalName = $UserPrincipalName; ErrorAction = 'Stop' }
+            if ($UseDeviceAuthentication) { $ippsParams['UseDeviceAuthentication'] = $true }
+            Connect-IPPSSession @ippsParams | Out-Null
             Write-ToLogFile -StringObject "$(Get-TimeStamp) Connected to Security & Compliance PowerShell." -LogFile $script:TIBS_LogFile
         }
         catch {
